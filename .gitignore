@@ -10,3 +10,5 @@ dist/
 *.tmp
 history.txt
 .DS_Store
+.coverage
+htmlcov/

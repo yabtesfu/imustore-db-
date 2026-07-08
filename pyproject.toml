@@ -15,6 +15,13 @@ dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4"]
 imustore = "imustore.tool:main"
 imustore-server = "imustore.server:main"
 
+# Ship only the library package. `bench` is a package (so `python -m
+# bench.benchmark` works) but is a dev tool, not part of the distribution;
+# without this, setuptools' flat-layout auto-discovery errors on the two
+# top-level packages ("Multiple top-level packages discovered").
+[tool.setuptools]
+packages = ["imustore"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
