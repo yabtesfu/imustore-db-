@@ -10,8 +10,11 @@ from .locking import FileLock
 
 SUPERBLOCK_SIZE = 4096
 ROOT_FORMAT = ">Q"
+COUNT_FORMAT = ">Q"
+HEADER_FORMAT = ">QQ"  # root address followed by live key count
 RECORD_HEADER_FORMAT = ">I"
 ROOT_BYTES = struct.calcsize(ROOT_FORMAT)
+COUNT_BYTES = struct.calcsize(COUNT_FORMAT)
 RECORD_HEADER_BYTES = struct.calcsize(RECORD_HEADER_FORMAT)
 
 
@@ -20,6 +23,7 @@ class StorageStats:
     file_size: int
     root_address: int
     record_count: int
+    key_count: int
 
 
 class Storage:
@@ -70,11 +74,20 @@ class Storage:
             raise DatabaseCorruptionError("storage superblock is incomplete")
         return struct.unpack(ROOT_FORMAT, payload)[0]
 
-    def commit_root_address(self, root_address: int) -> None:
+    def get_key_count(self) -> int:
+        self._f.seek(ROOT_BYTES)
+        payload = self._f.read(COUNT_BYTES)
+        if len(payload) != COUNT_BYTES:
+            return 0
+        return struct.unpack(COUNT_FORMAT, payload)[0]
+
+    def commit_root_address(self, root_address: int, key_count: int = 0) -> None:
         self.lock()
         self.flush()
         self._f.seek(0)
-        self._f.write(struct.pack(ROOT_FORMAT, root_address))
+        # Write the root pointer and key count as a single record so a reader
+        # never observes a new root paired with a stale count.
+        self._f.write(struct.pack(HEADER_FORMAT, root_address, key_count))
         self.flush()
         self.unlock()
 
@@ -124,6 +137,7 @@ class Storage:
             file_size=self._f.tell(),
             root_address=self.get_root_address(),
             record_count=self.count_records(),
+            key_count=self.get_key_count(),
         )
 
     def close(self) -> None:

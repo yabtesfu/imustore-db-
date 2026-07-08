@@ -7,17 +7,33 @@ from typing import Any, Callable
 
 from .audit import AuditReport
 from .binary_tree import BinaryTree
+from .bplus_tree import BPlusTree
 from .codec import Codec, JsonCodec
 from .errors import DatabaseClosedError, KeyEncodingError
 from .physical import Storage, StorageStats
 
+# Available index engines. The copy-on-write B+ tree is the default because it
+# stays balanced and shallow; the binary tree is kept as a simple reference.
+INDEX_CLASSES = {"bplus": BPlusTree, "binary": BinaryTree}
+DEFAULT_INDEX = "bplus"
+
 
 class DBDB(MutableMapping):
-    def __init__(self, fileobj, *, path: str | os.PathLike[str] | None = None, codec: Codec | None = None):
+    def __init__(
+        self,
+        fileobj,
+        *,
+        path: str | os.PathLike[str] | None = None,
+        codec: Codec | None = None,
+        index: str = DEFAULT_INDEX,
+    ):
+        if index not in INDEX_CLASSES:
+            raise ValueError(f"unknown index {index!r}; choose from {sorted(INDEX_CLASSES)}")
         self._path = Path(path) if path is not None else None
         self._codec = codec or JsonCodec()
+        self._index_name = index
         self._storage = Storage(fileobj)
-        self._tree = BinaryTree(self._storage)
+        self._tree = INDEX_CLASSES[index](self._storage)
 
     def _assert_open(self) -> None:
         if self._storage.closed:
@@ -110,7 +126,7 @@ class DBDB(MutableMapping):
 
         snapshot = list(self.items())
         temp_path = self._path.with_suffix(self._path.suffix + ".compact.tmp")
-        compacted = connect(temp_path, codec=self._codec)
+        compacted = connect(temp_path, codec=self._codec, index=self._index_name)
         try:
             for key, value in snapshot:
                 compacted[key] = value
@@ -123,7 +139,7 @@ class DBDB(MutableMapping):
         os.replace(temp_path, self._path)
         reopened = _open_database_file(self._path)
         self._storage = Storage(reopened)
-        self._tree = BinaryTree(self._storage)
+        self._tree = INDEX_CLASSES[self._index_name](self._storage)
         return stats
 
     def __enter__(self):
@@ -174,8 +190,13 @@ def _open_database_file(path: str | os.PathLike[str]):
     return os.fdopen(fd, "r+b")
 
 
-def connect(path: str | os.PathLike[str], *, codec: Codec | None = None) -> DBDB:
+def connect(
+    path: str | os.PathLike[str],
+    *,
+    codec: Codec | None = None,
+    index: str = DEFAULT_INDEX,
+) -> DBDB:
     db_path = Path(path)
     if db_path.parent and str(db_path.parent) != ".":
         db_path.parent.mkdir(parents=True, exist_ok=True)
-    return DBDB(_open_database_file(db_path), path=db_path, codec=codec)
+    return DBDB(_open_database_file(db_path), path=db_path, codec=codec, index=index)

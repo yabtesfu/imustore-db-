@@ -2,13 +2,16 @@
 
 ImmuStore DB is key-value database engine built in Python. It explores append-only storage, immutable indexing, lazy references, atomic commits, compaction, and command-line tooling without hiding the storage mechanics behind a large framework.
 
-The project is inspired by DBDB-style database internals: updates create new tree paths, records are appended to disk, and a commit becomes visible by swapping a single root address.
+The project is inspired by DBDB-style database internals: updates create new tree paths, records are appended to disk, and a commit becomes visible by swapping a single root address. The default index is a **copy-on-write B+ tree** — the same immutable-root design LMDB uses — so every leaf stays at the same depth and lookups remain shallow even after millions of ordered inserts.
 
 ## Features
 
 - Persistent key-value storage with a dictionary-style API
 - Append-only file records with a reserved superblock
-- Immutable binary tree index with lazy node/value loading
+- Copy-on-write **B+ tree** index (default): balanced, high fan-out, O(log n) reads/writes/scans
+- Pluggable index engine (`index="bplus"` default, `index="binary"` reference tree)
+- Lazy node/value loading so scans never touch unrelated values
+- O(1) `len()` via a live key count stored in the superblock
 - Atomic root commits with explicit disk flushes
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
@@ -69,7 +72,8 @@ imustore/
   locking.py      Cross-platform file lock wrapper
   physical.py     Append-only record storage
   logical.py      Lazy references and commit orchestration
-  binary_tree.py  Immutable binary tree index
+  bplus_tree.py   Copy-on-write B+ tree index (default engine)
+  binary_tree.py  Immutable binary tree index (reference engine)
   interface.py    Public database mapping API
   tool.py         Command-line interface
   audit.py        Integrity report model
@@ -79,6 +83,7 @@ docs/
 tests/
   test_interface.py
   test_storage.py
+  test_bplus_tree.py
   test_binary_tree.py
   test_compaction.py
   test_cli.py
