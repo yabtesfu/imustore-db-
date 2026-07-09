@@ -10,7 +10,7 @@ from .binary_tree import BinaryTree
 from .bplus_tree import BPlusTree
 from .codec import Codec, JsonCodec
 from .errors import DatabaseClosedError, KeyEncodingError
-from .physical import Storage, StorageStats
+from .physical import DURABILITY_FULL, Storage, StorageStats
 
 # Available index engines. The copy-on-write B+ tree is the default because it
 # stays balanced and shallow; the binary tree is kept as a simple reference.
@@ -26,13 +26,15 @@ class DBDB(MutableMapping):
         path: str | os.PathLike[str] | None = None,
         codec: Codec | None = None,
         index: str = DEFAULT_INDEX,
+        durability: str = DURABILITY_FULL,
     ):
         if index not in INDEX_CLASSES:
             raise ValueError(f"unknown index {index!r}; choose from {sorted(INDEX_CLASSES)}")
         self._path = Path(path) if path is not None else None
         self._codec = codec or JsonCodec()
         self._index_name = index
-        self._storage = Storage(fileobj)
+        self._durability = durability
+        self._storage = Storage(fileobj, durability=durability)
         self._tree = INDEX_CLASSES[index](self._storage)
 
     def _assert_open(self) -> None:
@@ -126,7 +128,9 @@ class DBDB(MutableMapping):
 
         snapshot = list(self.items())
         temp_path = self._path.with_suffix(self._path.suffix + ".compact.tmp")
-        compacted = connect(temp_path, codec=self._codec, index=self._index_name)
+        compacted = connect(
+            temp_path, codec=self._codec, index=self._index_name, durability=self._durability
+        )
         try:
             for key, value in snapshot:
                 compacted[key] = value
@@ -138,7 +142,7 @@ class DBDB(MutableMapping):
         self.close()
         os.replace(temp_path, self._path)
         reopened = _open_database_file(self._path)
-        self._storage = Storage(reopened)
+        self._storage = Storage(reopened, durability=self._durability)
         self._tree = INDEX_CLASSES[self._index_name](self._storage)
         return stats
 
@@ -195,8 +199,15 @@ def connect(
     *,
     codec: Codec | None = None,
     index: str = DEFAULT_INDEX,
+    durability: str = DURABILITY_FULL,
 ) -> DBDB:
     db_path = Path(path)
     if db_path.parent and str(db_path.parent) != ".":
         db_path.parent.mkdir(parents=True, exist_ok=True)
-    return DBDB(_open_database_file(db_path), path=db_path, codec=codec, index=index)
+    return DBDB(
+        _open_database_file(db_path),
+        path=db_path,
+        codec=codec,
+        index=index,
+        durability=durability,
+    )

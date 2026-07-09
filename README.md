@@ -12,7 +12,8 @@ The project is inspired by DBDB-style database internals: updates create new tre
 - Pluggable index engine (`index="bplus"` default, `index="binary"` reference tree)
 - Lazy node/value loading so scans never touch unrelated values
 - O(1) `len()` via a live key count stored in the superblock
-- Atomic root commits with explicit disk flushes
+- Crash-safe commits: per-record CRC32 checksums, double-buffered meta blocks, and torn-tail recovery on open
+- Configurable durability (`durability="full"` default, or `"none"` for speed)
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
 - Transaction-like `update_value` helper
@@ -85,13 +86,22 @@ tests/
   test_storage.py
   test_bplus_tree.py
   test_binary_tree.py
+  test_recovery.py
   test_compaction.py
   test_cli.py
 ```
 
 ## Durability Model
 
-New values and tree nodes are appended first. After those records are flushed, the database writes the new root node address into the superblock. A reader can therefore observe the old tree or the new tree, but not a half-committed tree.
+ImmuStore uses shadow paging (the same crash-recovery approach as LMDB), so no write-ahead log is needed. New values and tree nodes are appended and fsynced first; then the commit publishes a new **meta block** pointing at the new root. A reader always observes the old tree or the new tree, never a half-committed one.
+
+Crashes are handled by three mechanisms:
+
+- **Per-record CRC32 checksums** detect torn writes and bit-rot on read.
+- **Double-buffered meta blocks** (two slots, each with a transaction id and checksum) mean a torn meta write during a commit transparently falls back to the previous committed transaction.
+- **Torn-tail truncation** on open rolls back orphaned records left by a crash mid-append.
+
+`durability="none"` skips fsyncs for throughput at the cost of losing recent commits on power loss. See [docs/architecture.md](docs/architecture.md) and [docs/storage-format.md](docs/storage-format.md) for details.
 
 ## Testing
 

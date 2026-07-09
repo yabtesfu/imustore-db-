@@ -6,11 +6,34 @@ ImmuStore DB splits the storage engine into layers so each piece has one job.
 - `logical.py` manages logical updates, commits, and lazy value references.
 - `bplus_tree.py` implements the default copy-on-write B+ tree index.
 - `binary_tree.py` implements a simpler immutable binary search tree, kept as a reference engine.
-- `physical.py` owns append-only records, root-address commits, the live key count, flushing, and file statistics.
+- `physical.py` owns append-only records, checksums, crash recovery, transactional meta blocks, and file statistics.
 - `audit.py` provides structured integrity reports for tree metadata and value reachability.
 - `tool.py` provides terminal access for reads, writes, deletes, compaction, and inspection.
 
-Updates are staged in memory until `commit()` is called. A commit stores dirty values and tree nodes first, then writes a single root pointer in the superblock. Readers see either the previous root or the new root.
+Updates are staged in memory until `commit()` is called. A commit stores dirty values and tree nodes first, then publishes a new meta block that points at the new root. Readers see either the previous root or the new root.
+
+## Durability and crash recovery
+
+ImmuStore uses **shadow paging**: writes only ever append: an update never
+overwrites live data, and the commit is an atomic pointer flip to a new root.
+This is the same crash-recovery paradigm as LMDB, and like LMDB it needs no
+separate write-ahead log: a redo log would be redundant because the tree is
+already immutable and the root swap is already atomic. Instead, three
+mechanisms in `physical.py` make that swap provably crash-safe:
+
+- **Per-record checksums.** Every record carries a CRC32 of its payload, so a
+  torn write or bit-rot is caught on read rather than returned as valid data.
+- **Double-buffered meta blocks.** Two meta slots each carry a transaction id,
+  the root address, the key count, the durable file length, and a CRC. A commit
+  writes the *other* slot and fsyncs it before it is durable, so the last good
+  meta is never in flight. On open the engine adopts the highest-id slot whose
+  CRC verifies; a torn newest commit transparently falls back to the one before.
+- **Torn-tail truncation.** A crash after appending records but before
+  publishing the meta leaves orphaned records past the last durable length; open
+  truncates them, restoring the file to its last committed transaction.
+
+The `durability` setting (`full` by default, or `none`) trades fsync cost for
+speed. See [storage-format.md](storage-format.md) for the on-disk layout.
 
 ## Index engine
 
