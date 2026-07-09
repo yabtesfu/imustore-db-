@@ -1,7 +1,7 @@
 [project]
 name = "imustore-db"
-version = "0.1.0"
-description = "An educational append-only key-value database with immutable indexing."
+version = "0.2.0"
+description = "An append-only key-value database with a copy-on-write B+ tree index and crash-safe commits."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "yabtesfu" }]
@@ -9,10 +9,17 @@ license = "MIT"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4"]
 
 [project.scripts]
 imustore = "imustore.tool:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.coverage.run]
+source = ["imustore"]

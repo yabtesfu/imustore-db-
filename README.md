@@ -1,5 +1,7 @@
 # ImmuStore DB
 
+[![CI](https://github.com/yabtesfu/imustore-db-/actions/workflows/ci.yml/badge.svg)](https://github.com/yabtesfu/imustore-db-/actions/workflows/ci.yml)
+
 ImmuStore DB is key-value database engine built in Python. It explores append-only storage, immutable indexing, lazy references, atomic commits, compaction, and command-line tooling without hiding the storage mechanics behind a large framework.
 
 The project is inspired by DBDB-style database internals: updates create new tree paths, records are appended to disk, and a commit becomes visible by swapping a single root address. The default index is a **copy-on-write B+ tree** — the same immutable-root design LMDB uses — so every leaf stays at the same depth and lookups remain shallow even after millions of ordered inserts.
@@ -109,6 +111,25 @@ Crashes are handled by three mechanisms:
 python -m pytest
 ```
 
+The suite includes a randomized fuzz test for the B+ tree (checked against a reference `dict`) and a crash-injection matrix that simulates power loss at the byte level and asserts the database always recovers a committed state.
+
+## Benchmarks
+
+```bash
+python -m bench.benchmark
+```
+
+Representative results (pure-Python engine; numbers are relative and machine-dependent):
+
+**Why the balanced index matters** — inserting *sorted* keys, the worst case for an unbalanced tree:
+
+| Sorted keys | B+ tree height | B+ tree time | Binary tree height | Binary tree time |
+| --- | --- | --- | --- | --- |
+| 1,000 | 2 | 4 ms | 1,000 | 1,103 ms |
+| 5,000 | 3 | 26 ms | 5,000 | 30,451 ms |
+
+The B+ tree stays shallow and fast; the naive binary tree degrades to a linked list (height == N, ~1000× slower) before it overflows the recursion stack entirely. See [bench/](bench/) for throughput and durability numbers.
+
 ## Status
 
-This is a learning project, not a production database. The code favors readability and explicit storage concepts so database internals can be studied directly.
+This started as a learning project. It has since grown a balanced copy-on-write B+ tree index, crash-safe shadow-paging commits with checksums and recovery, benchmarks, and CI — the building blocks of a real storage engine, kept small enough to read end to end.
