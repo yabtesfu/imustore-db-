@@ -32,7 +32,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 
-from .errors import DatabaseCorruptionError
+from .errors import DatabaseCorruptionError, ImmuStoreError
 from .locking import FileLock
 
 
@@ -80,12 +80,13 @@ def _crc(payload: bytes) -> int:
 
 
 class Storage:
-    def __init__(self, fileobj, *, durability: str = DURABILITY_FULL):
+    def __init__(self, fileobj, *, durability: str = DURABILITY_FULL, readonly: bool = False):
         if durability not in DURABILITY_MODES:
             raise ValueError(f"unknown durability {durability!r}; choose from {DURABILITY_MODES}")
         self._f = fileobj
         self._lock = FileLock(fileobj)
         self._durability = durability
+        self._readonly = readonly
         self._meta: _Meta | None = None
         self._ensure_meta()
 
@@ -165,7 +166,15 @@ class Storage:
 
     def _ensure_meta(self) -> None:
         if self._file_size() < SUPERBLOCK_SIZE:
+            if self._readonly:
+                self._meta = _Meta(0, 0, 0, SUPERBLOCK_SIZE, 0)
+                return
             self._init_meta()
+            return
+        if self._readonly:
+            # A read-only view (e.g. a snapshot) never recovers or truncates; it
+            # only reads committed records, so it cannot disturb a live writer.
+            self._meta = self._read_best_meta()
             return
         # Hold the write lock while recovering so we cannot race a writer that is
         # mid-commit (it holds the lock until its meta block is durable).
@@ -193,6 +202,8 @@ class Storage:
         return self._meta.txn_id
 
     def commit_root_address(self, root_address: int, key_count: int = 0) -> None:
+        if self._readonly:
+            raise ImmuStoreError("cannot commit on a read-only storage")
         self.lock()
         # Data records must be durable before the meta block that references them.
         if self._durability == DURABILITY_FULL:
@@ -212,6 +223,8 @@ class Storage:
 
     # -- record I/O ---------------------------------------------------------
     def write(self, payload: bytes) -> int:
+        if self._readonly:
+            raise ImmuStoreError("cannot write to a read-only storage")
         if not isinstance(payload, bytes):
             raise TypeError("storage payload must be bytes")
         address = max(self._file_size(), SUPERBLOCK_SIZE)

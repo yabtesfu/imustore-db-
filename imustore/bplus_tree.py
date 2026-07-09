@@ -325,9 +325,14 @@ class BPlusTree(LogicalBase):
             node = self._follow(node.children[0])
         return height + (1 if isinstance(node, LeafNode) else 0)
 
-    def audit(self) -> AuditReport:
-        if not self._storage.locked:
-            self._refresh_tree_ref()
+    def audit(self, root_ref=None, count=None) -> AuditReport:
+        # With no arguments this audits the current committed tree; a Snapshot
+        # passes its pinned root so it can audit a specific version.
+        if root_ref is None:
+            if not self._storage.locked:
+                self._refresh_tree_ref()
+            root_ref = self._tree_ref
+            count = self._count
         errors: list = []
         counters = {"nodes": 0, "values": 0, "leaf_keys": 0}
 
@@ -373,11 +378,11 @@ class BPlusTree(LogicalBase):
                 errors.append("tree is not height-balanced across children")
             return 1 + (max(heights) if heights else 0)
 
-        root = self._follow(self._tree_ref)
+        root = self._follow(root_ref)
         height = 0 if root is None else check(root, None, None, True)
-        if counters["leaf_keys"] != self._count:
+        if counters["leaf_keys"] != count:
             errors.append(
-                f"stored key count {self._count} != leaf key count {counters['leaf_keys']}"
+                f"stored key count {count} != leaf key count {counters['leaf_keys']}"
             )
         return AuditReport(
             keys=counters["leaf_keys"],

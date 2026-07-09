@@ -18,6 +18,7 @@ The project is inspired by DBDB-style database internals: updates create new tre
 - Configurable durability (`durability="full"` default, or `"none"` for speed)
 - Networked server speaking the Redis RESP protocol (works with `redis-cli`)
 - Real-time change-data-capture: `SUBSCRIBE` to a key prefix and stream live set/delete events
+- MVCC: lock-free consistent read snapshots, and optimistic transactions with write-conflict detection
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
 - Transaction-like `update_value` helper
@@ -81,6 +82,7 @@ imustore/
   binary_tree.py  Immutable binary tree index (reference engine)
   interface.py    Public database mapping API
   tool.py         Command-line interface
+  mvcc.py         MVCC read snapshots
   server.py       Async RESP network server
   resp.py         RESP protocol codec
   pubsub.py       Change-data-capture broker
@@ -94,9 +96,40 @@ tests/
   test_bplus_tree.py
   test_binary_tree.py
   test_recovery.py
+  test_mvcc.py
+  test_server.py
   test_compaction.py
   test_cli.py
 ```
+
+## Concurrency (MVCC)
+
+Because the B+ tree is copy-on-write, ImmuStore gets multi-version concurrency control almost for free — the same model LMDB uses: **one writer at a time, many lock-free concurrent readers.**
+
+A **snapshot** pins the committed version at the moment it is taken and reads from its own file handle, so it never blocks (or is blocked by) a writer and never sees later commits:
+
+```python
+snap = db.snapshot()          # frozen, consistent, point-in-time view
+db["price"] = 130
+db.commit()                   # snap is unaffected
+print(snap["price"])          # still the old value
+snap.close()
+```
+
+**Transactions are optimistic and snapshot-isolated.** The body reads a private snapshot plus its own buffered writes (read-your-writes) and holds no lock; at commit the transaction verifies that nothing it wrote changed underneath it, else raises `ConflictError` so you can retry:
+
+```python
+from imustore import ConflictError
+
+tx = db.begin()
+tx.update("stock", lambda n: n - 1)
+try:
+    tx.commit()
+except ConflictError:
+    ...                       # a concurrent commit touched "stock"; retry
+```
+
+`with db.transaction() as tx:` commits on success and rolls back on exception. See `examples/mvcc_snapshot.py`.
 
 ## Network server & real-time changefeed
 

@@ -9,6 +9,7 @@ ImmuStore DB splits the storage engine into layers so each piece has one job.
 - `physical.py` owns append-only records, checksums, crash recovery, transactional meta blocks, and file statistics.
 - `audit.py` provides structured integrity reports for tree metadata and value reachability.
 - `tool.py` provides terminal access for reads, writes, deletes, compaction, and inspection.
+- `mvcc.py` provides consistent, read-only point-in-time snapshots.
 - `server.py` / `resp.py` / `pubsub.py` expose the database over the network with a real-time changefeed.
 
 Updates are staged in memory until `commit()` is called. A commit stores dirty values and tree nodes first, then publishes a new meta block that points at the new root. Readers see either the previous root or the new root.
@@ -35,6 +36,29 @@ mechanisms in `physical.py` make that swap provably crash-safe:
 
 The `durability` setting (`full` by default, or `none`) trades fsync cost for
 speed. See [storage-format.md](storage-format.md) for the on-disk layout.
+
+## Concurrency (MVCC)
+
+The copy-on-write tree makes multi-version concurrency control natural, and the
+engine adopts LMDB's model: **a single writer at a time, plus any number of
+lock-free concurrent readers.**
+
+A `Snapshot` captures the committed root address at the moment it is created and
+opens its *own* read-only file handle (`Storage(readonly=True)`, which skips
+recovery so it cannot disturb a live writer). Because old nodes are never
+overwritten, that pinned root keeps resolving to a complete, consistent version
+no matter how many commits follow. Readers therefore never take the write lock:
+they don't block writers, and writers don't block them.
+
+Transactions are optimistic. The body reads from a private base snapshot plus an
+in-memory write overlay (read-your-writes) and holds no lock. At commit the
+transaction takes the write lock briefly, re-reads the current committed values
+for every key it wrote, and aborts with `ConflictError` if any changed since the
+base snapshot (first-committer-wins snapshot isolation); otherwise it applies the
+overlay onto the current root and commits. An in-process mutex plus the on-disk
+file lock serialize the commit critical section. Because compaction rewrites the
+file and invalidates pinned roots, it refuses to run while any snapshot (or
+transaction) is open.
 
 ## Network server and real-time changefeed
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Callable
@@ -9,7 +10,8 @@ from .audit import AuditReport
 from .binary_tree import BinaryTree
 from .bplus_tree import BPlusTree
 from .codec import Codec, JsonCodec
-from .errors import DatabaseClosedError, KeyEncodingError
+from .errors import ConflictError, DatabaseClosedError, ImmuStoreError, KeyEncodingError
+from .mvcc import Snapshot
 from .physical import DURABILITY_FULL, Storage, StorageStats
 
 # Available index engines. The copy-on-write B+ tree is the default because it
@@ -36,6 +38,8 @@ class DBDB(MutableMapping):
         self._durability = durability
         self._storage = Storage(fileobj, durability=durability)
         self._tree = INDEX_CLASSES[index](self._storage)
+        self._write_mutex = threading.Lock()  # serializes commit critical sections in-process
+        self._open_snapshots = 0
 
     def _assert_open(self) -> None:
         if self._storage.closed:
@@ -118,13 +122,41 @@ class DBDB(MutableMapping):
         self[key] = updated
         return updated
 
+    def snapshot(self) -> Snapshot:
+        """Open a consistent, read-only, point-in-time view (see mvcc.Snapshot).
+
+        The snapshot pins the current committed version and reads from its own
+        file handle, so it never blocks (or is blocked by) writers and will not
+        observe commits made after it was taken.
+        """
+        self._assert_open()
+        if self._path is None:
+            raise ValueError("snapshots require a path-backed database")
+        root = self._storage.get_root_address()
+        count = self._storage.get_key_count()
+        reader = os.fdopen(os.open(self._path, os.O_RDONLY), "rb")
+        self._open_snapshots += 1
+        return Snapshot(reader, root, count, codec=self._codec, on_close=self._snapshot_closed)
+
+    def _snapshot_closed(self) -> None:
+        self._open_snapshots = max(0, self._open_snapshots - 1)
+
     def transaction(self) -> "Transaction":
+        """Begin an optimistic, snapshot-isolated transaction (use with ``with``)."""
         return Transaction(self)
+
+    def begin(self) -> "Transaction":
+        """Begin a transaction eagerly for manual ``commit()``/``abort()`` control."""
+        transaction = Transaction(self)
+        transaction._begin()
+        return transaction
 
     def compact(self) -> StorageStats:
         self._assert_open()
         if self._path is None:
             raise ValueError("compaction requires a path-backed database")
+        if self._open_snapshots > 0:
+            raise ImmuStoreError("cannot compact while snapshots or transactions are open")
 
         snapshot = list(self.items())
         temp_path = self._path.with_suffix(self._path.suffix + ".compact.tmp")
@@ -154,35 +186,118 @@ class DBDB(MutableMapping):
         self.close()
 
 
+_DELETED = object()  # tombstone marker in a transaction's write overlay
+
+
 class Transaction:
+    """An optimistic, snapshot-isolated write transaction.
+
+    Reads see a private snapshot taken when the transaction began, overlaid with
+    the transaction's own uncommitted writes (read-your-writes). Writes are
+    buffered in memory, so the transaction body never holds the write lock. At
+    commit the transaction briefly locks, checks that no key it wrote was changed
+    by a concurrent commit, and either applies all writes atomically or raises
+    :class:`ConflictError` so the caller can retry.
+    """
+
     def __init__(self, db: DBDB):
         self._db = db
-        self._snapshot_ref = None
+        self._base: Snapshot | None = None
+        self._overlay: dict[str, Any] = {}
+
+    def _begin(self) -> None:
+        if self._base is None:
+            self._db._assert_open()
+            self._base = self._db.snapshot()
 
     def __enter__(self) -> "Transaction":
-        self._db._assert_open()
-        if self._db._storage.lock():
-            self._db._tree._refresh_tree_ref()
-        self._snapshot_ref = self._db._tree._tree_ref
+        self._begin()
         return self
 
+    def get(self, key: str) -> Any:
+        self._db._validate_key(key)
+        if key in self._overlay:
+            payload = self._overlay[key]
+            if payload is _DELETED:
+                raise KeyError(key)
+            return self._db._codec.decode(payload)
+        return self._base[key]
+
+    def get_or_none(self, key: str, default: Any = None) -> Any:
+        try:
+            return self.get(key)
+        except KeyError:
+            return default
+
+    def __contains__(self, key: str) -> bool:
+        if key in self._overlay:
+            return self._overlay[key] is not _DELETED
+        return key in self._base
+
     def set(self, key: str, value: Any) -> None:
-        self._db[key] = value
+        self._db._validate_key(key)
+        self._overlay[key] = self._db._codec.encode(value)
 
     def delete(self, key: str) -> None:
-        del self._db[key]
+        self._db._validate_key(key)
+        if key not in self:
+            raise KeyError(key)
+        self._overlay[key] = _DELETED
 
     def update(self, key: str, updater: Callable[[Any], Any], *, default: Any = None) -> Any:
-        return self._db.update_value(key, updater, default=default)
+        updated = updater(self.get_or_none(key, default))
+        self.set(key, updated)
+        return updated
+
+    def commit(self) -> None:
+        try:
+            if not self._overlay:
+                return
+            db = self._db
+            with db._write_mutex:
+                db._storage.lock()
+                try:
+                    db._tree._refresh_tree_ref()
+                    self._check_conflicts()
+                    for key, payload in self._overlay.items():
+                        if payload is _DELETED:
+                            try:
+                                db._tree.delete(key)
+                            except KeyError:
+                                pass
+                        else:
+                            db._tree.set(key, payload)
+                    db._tree.commit()  # publishes the new root and releases the lock
+                finally:
+                    if db._storage.locked:
+                        db._storage.unlock()
+        finally:
+            self._close_base()
+
+    def _check_conflicts(self) -> None:
+        for key in self._overlay:
+            base_value = self._base._raw(key)
+            try:
+                current_value = self._db._tree.get(key)
+            except KeyError:
+                current_value = None
+            if base_value != current_value:
+                raise ConflictError(f"write conflict on {key!r}: changed since the transaction began")
+
+    def abort(self) -> None:
+        self._overlay.clear()
+        self._close_base()
+
+    def _close_base(self) -> None:
+        if self._base is not None:
+            self._base.close()
+            self._base = None
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         if exc_type is not None:
-            if self._snapshot_ref is not None:
-                self._db._tree._tree_ref = self._snapshot_ref
-            if self._db._storage.locked:
-                self._db._storage.unlock()
+            self.abort()
             return False
-        self._db.commit()
+        self.commit()
         return False
 
 

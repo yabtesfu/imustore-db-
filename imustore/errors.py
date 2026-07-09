@@ -12,3 +12,7 @@ class DatabaseCorruptionError(ImmuStoreError):
 
 class KeyEncodingError(ImmuStoreError):
     """Raised when a database key is not a comparable string."""
+
+
+class ConflictError(ImmuStoreError):
+    """Raised when an optimistic transaction conflicts with a concurrent commit."""

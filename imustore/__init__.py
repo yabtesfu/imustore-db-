@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from .audit import AuditReport
 from .codec import BytesCodec, JsonCodec, TextCodec
+from .errors import ConflictError
 from .interface import DBDB, connect
+from .mvcc import Snapshot
 
 __all__ = [
     "AuditReport",
     "BytesCodec",
+    "ConflictError",
     "DBDB",
     "ImmuServer",
     "JsonCodec",
+    "Snapshot",
     "TextCodec",
     "connect",
 ]
