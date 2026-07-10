@@ -16,6 +16,8 @@ The project is inspired by DBDB-style database internals: updates create new tre
 - O(1) `len()` via a live key count stored in the superblock
 - Crash-safe commits: per-record CRC32 checksums, double-buffered meta blocks, and torn-tail recovery on open
 - Configurable durability (`durability="full"` default, or `"none"` for speed)
+- Networked server speaking the Redis RESP protocol (works with `redis-cli`)
+- Real-time change-data-capture: `SUBSCRIBE` to a key prefix and stream live set/delete events
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
 - Transaction-like `update_value` helper
@@ -79,6 +81,9 @@ imustore/
   binary_tree.py  Immutable binary tree index (reference engine)
   interface.py    Public database mapping API
   tool.py         Command-line interface
+  server.py       Async RESP network server
+  resp.py         RESP protocol codec
+  pubsub.py       Change-data-capture broker
   audit.py        Integrity report model
 docs/
   architecture.md
@@ -92,6 +97,34 @@ tests/
   test_compaction.py
   test_cli.py
 ```
+
+## Network server & real-time changefeed
+
+ImmuStore ships a networked server that speaks Redis's RESP protocol, so `redis-cli` and any Redis client library work against it unchanged:
+
+```bash
+python -m imustore.server --path data.db --port 6380
+```
+
+```bash
+redis-cli -p 6380 set greeting hello
+redis-cli -p 6380 get greeting          # "hello"
+redis-cli -p 6380 keys 'user:*'
+redis-cli -p 6380 subscribe user:       # live change stream for user:* keys
+```
+
+The headline feature is **change data capture**: `SUBSCRIBE <prefix>` turns the database into a live stream. Every time a key under that prefix is set or deleted, subscribers are pushed a change event the instant it commits — the building block for cache invalidation, materialized views, or real-time UIs.
+
+```
+$ python examples/realtime_subscriber.py
+writer: SET user:1 Ada         -> OK
+  >> live change on 'user:': {'key': 'user:1', 'op': 'set', 'value': 'Ada'}
+writer: SET other:9 not-a-user -> OK
+writer: DEL user:1             -> 1
+  >> live change on 'user:': {'key': 'user:1', 'op': 'del', 'value': None}
+```
+
+The server is built on stdlib `asyncio`. Database access is funnelled through a single-thread executor, which serializes writes safely against the single-writer engine while keeping the event loop responsive during a commit's fsync. Supported commands: `PING`, `ECHO`, `SET`, `GET`, `DEL`, `EXISTS`, `KEYS`, `DBSIZE`, `SUBSCRIBE`, `UNSUBSCRIBE`, `QUIT`.
 
 ## Durability Model
 

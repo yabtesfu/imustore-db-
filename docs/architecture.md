@@ -9,6 +9,7 @@ ImmuStore DB splits the storage engine into layers so each piece has one job.
 - `physical.py` owns append-only records, checksums, crash recovery, transactional meta blocks, and file statistics.
 - `audit.py` provides structured integrity reports for tree metadata and value reachability.
 - `tool.py` provides terminal access for reads, writes, deletes, compaction, and inspection.
+- `server.py` / `resp.py` / `pubsub.py` expose the database over the network with a real-time changefeed.
 
 Updates are staged in memory until `commit()` is called. A commit stores dirty values and tree nodes first, then publishes a new meta block that points at the new root. Readers see either the previous root or the new root.
 
@@ -34,6 +35,25 @@ mechanisms in `physical.py` make that swap provably crash-safe:
 
 The `durability` setting (`full` by default, or `none`) trades fsync cost for
 speed. See [storage-format.md](storage-format.md) for the on-disk layout.
+
+## Network server and real-time changefeed
+
+`server.py` is an `asyncio` TCP server speaking Redis's RESP protocol
+(`resp.py`), so `redis-cli` and standard Redis clients connect unchanged. Each
+client is one coroutine reading commands and writing replies.
+
+The storage engine is single-writer, so the server funnels every database
+operation through a single-thread executor. That serializes access safely
+against the engine while keeping the event loop responsive during a commit's
+fsync, and it is the seam where Phase 3 (MVCC / snapshot isolation) will let
+reads run concurrently with writes.
+
+`pubsub.py` is the change-data-capture broker. Because the server is the only
+gateway for writes, it publishes a `(key, op, value)` event to the broker after
+each committed mutation. A client that issued `SUBSCRIBE <prefix>` holds a
+bounded queue; a background "pump" task drains it to the socket, so matching
+changes stream to the client live. Bounded queues mean a slow subscriber sheds
+messages rather than growing memory without limit.
 
 ## Index engine
 

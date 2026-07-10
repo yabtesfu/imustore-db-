@@ -4,4 +4,22 @@ from .audit import AuditReport
 from .codec import BytesCodec, JsonCodec, TextCodec
 from .interface import DBDB, connect
 
-__all__ = ["AuditReport", "BytesCodec", "DBDB", "JsonCodec", "TextCodec", "connect"]
+__all__ = [
+    "AuditReport",
+    "BytesCodec",
+    "DBDB",
+    "ImmuServer",
+    "JsonCodec",
+    "TextCodec",
+    "connect",
+]
+
+
+def __getattr__(name):
+    # Loaded lazily so `python -m imustore.server` does not re-import the package
+    # mid-startup (which triggers a RuntimeWarning).
+    if name == "ImmuServer":
+        from .server import ImmuServer
+
+        return ImmuServer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
