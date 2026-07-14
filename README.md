@@ -1,45 +1,70 @@
 # ImmuStore DB
 
 [![CI](https://github.com/yabtesfu/imustore-db-/actions/workflows/ci.yml/badge.svg)](https://github.com/yabtesfu/imustore-db-/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Dependencies](https://img.shields.io/badge/runtime%20dependencies-zero-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-ImmuStore DB is key-value database engine built in Python. It explores append-only storage, immutable indexing, lazy references, atomic commits, compaction, and command-line tooling without hiding the storage mechanics behind a large framework.
+**A distributed database engine written from scratch in pure Python** — a copy-on-write B+ tree storage core with crash-safe durability, MVCC, a Redis-compatible network server with a real-time changefeed, Raft replication, a document/query layer, observability, and FoundationDB-style deterministic simulation testing. No third-party runtime dependencies, and small enough to read end to end.
 
-The project is inspired by DBDB-style database internals: updates create new tree paths, records are appended to disk, and a commit becomes visible by swapping a single root address. The default index is a **copy-on-write B+ tree** — the same immutable-root design LMDB uses — so every leaf stays at the same depth and lookups remain shallow even after millions of ordered inserts.
+It began as a DBDB-style learning project and grew, one deliberate phase at a time, into the building blocks of a real database. Writes never overwrite data: they append new immutable B+ tree nodes and publish a new root — the same shadow-paging design LMDB uses — so a reader always sees a consistent version and a commit is a single atomic pointer swap.
 
-## Features
+## What's inside
 
-- Persistent key-value storage with a dictionary-style API
-- Append-only file records with a reserved superblock
-- Copy-on-write **B+ tree** index (default): balanced, high fan-out, O(log n) reads/writes/scans
-- Pluggable index engine (`index="bplus"` default, `index="binary"` reference tree)
-- Lazy node/value loading so scans never touch unrelated values
-- O(1) `len()` via a live key count stored in the superblock
-- Crash-safe commits: per-record CRC32 checksums, double-buffered meta blocks, and torn-tail recovery on open
-- Configurable durability (`durability="full"` default, or `"none"` for speed)
-- Networked server speaking the Redis RESP protocol (works with `redis-cli`)
-- Real-time change-data-capture: `SUBSCRIBE` to a key prefix and stream live set/delete events
-- MVCC: lock-free consistent read snapshots, and optimistic transactions with write-conflict detection
-- Raft consensus: replicate the database across a cluster with leader election and automatic failover
-- Document collections with secondary indexes, a query planner (index-or-scan), and TTL expiry
-- Observability: a Prometheus metrics endpoint and container images (Dockerfile + compose)
-- Deterministic simulation testing: seeded, reproducible fault injection against a simulated disk
-- Cross-platform file locking around writes
-- JSON, text, and bytes codecs
-- Transaction-like `update_value` helper
-- Atomic transaction context for grouped writes
-- Prefix and range scans over sorted keys
-- Integrity audit reports for tree metadata and value reachability
-- Database compaction for reclaiming stale append-only records
-- CLI commands for `get`, `set`, `delete`, `keys`, `scan`, `audit`, `stats`, and `compact`
-- Storage format and architecture documentation
-- Unit tests for API, tree behavior, storage, compaction, and CLI flows
+**Storage & indexing**
+- Copy-on-write **B+ tree** index — balanced, high fan-out, O(log n) reads/writes/scans (pluggable; a simpler binary tree ships as a reference engine)
+- Append-only records with lazy node/value loading, O(1) `len()`, sorted prefix/range scans, and compaction
+- JSON / text / bytes codecs and structured integrity `audit()` reports
+
+**Durability & crash recovery**
+- Shadow-paging commits with per-record CRC32 checksums and **double-buffered meta blocks**
+- Torn-tail truncation and torn-meta fallback on open; configurable fsync policy (`durability="full"`/`"none"`)
+
+**Concurrency (MVCC)**
+- Lock-free, consistent, point-in-time **read snapshots** (one writer, many readers — the LMDB model)
+- Optimistic, snapshot-isolated **transactions** with write-conflict detection
+
+**Distribution**
+- **Raft consensus** — leader election, log replication, and automatic failover across a cluster
+
+**Data model & queries**
+- Document **collections** with secondary indexes, a **query planner** (index-or-scan), and **TTL** expiry
+
+**Networking & real-time**
+- Async server speaking Redis's **RESP protocol** (`redis-cli` and Redis clients work unchanged)
+- **Change data capture**: `SUBSCRIBE` to a key prefix and stream live set/delete events
+
+**Operability**
+- **Prometheus** metrics + an admin HTTP endpoint; a Dockerfile and compose (single node or a 3-node Raft cluster)
+
+**Correctness**
+- **Deterministic simulation testing**: seed-reproducible fault injection against a simulated disk, plus property/fuzz tests and green CI on Python 3.10–3.12
+
+## Built in seven phases
+
+Each phase is a self-contained, tested, and reviewed step from an educational toy to a real engine:
+
+| Phase | Theme | What landed |
+| --- | --- | --- |
+| 0 | Credibility | benchmark suite, CI, record checksums |
+| 1 | A real index | copy-on-write B+ tree (replacing an unbalanced BST) |
+| 2 | Durability | checksums, double-buffered meta blocks, crash recovery |
+| 3 | Concurrency | MVCC snapshots + optimistic transactions |
+| 4 | Networking | RESP server + real-time changefeed |
+| 5 | Distribution | Raft replication |
+| 6 | Query & ops | secondary indexes, query planner, TTL, metrics, Docker |
+| 7 | Correctness | deterministic simulation testing |
+
+> **Status:** a learning-grade engine, not a production database — it is pure Python and single-writer per node. The point is to implement real database internals directly, and to test them the way real databases are tested.
 
 ## Install
 
+Requires Python 3.10+ and has no runtime dependencies.
+
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .[dev]
+python3.11 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"          # dev extras: pytest, pytest-cov, ruff
 ```
 
 ## Python API
@@ -279,6 +304,9 @@ Representative results (pure-Python engine; numbers are relative and machine-dep
 
 The B+ tree stays shallow and fast; the naive binary tree degrades to a linked list (height == N, ~1000× slower) before it overflows the recursion stack entirely. See [bench/](bench/) for throughput and durability numbers.
 
-## Status
+## Documentation
 
-This started as a learning project. It has since grown a balanced copy-on-write B+ tree index, crash-safe shadow-paging commits with checksums and recovery, MVCC snapshots and optimistic transactions, a Redis-protocol server with a real-time changefeed, Raft replication, a document/query layer, observability, and deterministic simulation testing — the building blocks of a real distributed database, kept small enough to read end to end.
+- [docs/architecture.md](docs/architecture.md) — how the layers fit together
+- [docs/storage-format.md](docs/storage-format.md) — the on-disk format
+- [docs/raft.md](docs/raft.md) — the consensus design
+- [docs/query-operations.md](docs/query-operations.md) — query and scan operations
