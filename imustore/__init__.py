@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .audit import AuditReport
 from .codec import BytesCodec, JsonCodec, TextCodec
+from .collection import Collection
 from .errors import ConflictError
 from .interface import DBDB, connect
 from .mvcc import Snapshot
@@ -9,6 +10,7 @@ from .mvcc import Snapshot
 __all__ = [
     "AuditReport",
     "BytesCodec",
+    "Collection",
     "ConflictError",
     "DBDB",
     "ImmuServer",

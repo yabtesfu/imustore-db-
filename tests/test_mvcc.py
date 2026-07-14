@@ -151,6 +151,42 @@ def test_compaction_is_blocked_while_a_snapshot_is_open(tmp_path):
     db.close()
 
 
+def test_concurrent_transactions_and_snapshots_do_not_corrupt(tmp_path):
+    # Opening a snapshot must not race a committing transaction on the shared
+    # file: many threads write via transactions and read via snapshots at once,
+    # and the database must stay structurally sound.
+    db = imustore.connect(tmp_path / "race.db")
+    db["seed"] = 0
+    db.commit()
+    errors = []
+
+    def worker(worker_id):
+        try:
+            for i in range(25):
+                while True:
+                    try:
+                        with db.transaction() as tx:
+                            tx.set(f"w{worker_id}-{i}", i)
+                        break
+                    except ConflictError:
+                        continue
+                with db.snapshot() as snap:
+                    list(snap.items())
+        except Exception as exc:  # pragma: no cover - surfaced via errors
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, errors
+    assert db.audit().ok
+    assert len(db) == 4 * 25 + 1  # every write landed; nothing was lost or corrupted
+    db.close()
+
+
 def test_concurrent_readers_are_isolated_from_a_concurrent_writer(tmp_path):
     db = imustore.connect(tmp_path / "concurrent.db")
     for i in range(200):

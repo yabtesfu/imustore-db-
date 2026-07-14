@@ -20,10 +20,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fnmatch
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .codec import TextCodec
 from .interface import connect
+from .metrics import REGISTRY
 from .physical import DURABILITY_FULL
 from .pubsub import ChangeBroker
 from .resp import Error, SimpleString, ProtocolError, encode, read_command
@@ -34,7 +36,7 @@ _GLOB_METACHARS = set("*?[]")
 
 
 class ImmuServer:
-    def __init__(self, path, *, durability: str = DURABILITY_FULL):
+    def __init__(self, path, *, durability: str = DURABILITY_FULL, registry=None):
         self._path = path
         self._durability = durability
         self._db = None
@@ -42,6 +44,18 @@ class ImmuServer:
         self._broker = ChangeBroker()
         self._server = None
         self._loop = None
+
+        self.registry = registry or REGISTRY
+        self._m_commands = self.registry.counter("immustore_commands_total", "RESP commands handled")
+        self._m_latency = self.registry.histogram(
+            "immustore_command_seconds", "RESP command handling latency (seconds)"
+        )
+        self._m_connections = self.registry.gauge(
+            "immustore_connections", "currently open client connections"
+        )
+        self._m_changes = self.registry.counter(
+            "immustore_change_events_total", "change events published to subscribers"
+        )
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self, host: str = "127.0.0.1", port: int = 6380):
@@ -124,6 +138,7 @@ class _Connection:
         self._subscriptions = set()
 
     async def serve(self) -> None:
+        self._server._m_connections.inc()
         try:
             while True:
                 try:
@@ -138,6 +153,7 @@ class _Connection:
                 if not await self._dispatch(args):
                     break
         finally:
+            self._server._m_connections.dec()
             await self._teardown()
 
     async def _send(self, value) -> None:
@@ -146,15 +162,23 @@ class _Connection:
 
     async def _dispatch(self, args) -> bool:
         command = args[0].upper()
+        name = command.decode("ascii", "ignore").lower()
         if self._subscriptions and command not in _SUBSCRIBE_MODE_COMMANDS:
             await self._send(Error("ERR only SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed while subscribed"))
             return True
 
-        handler = getattr(self, f"_cmd_{command.decode('ascii', 'ignore').lower()}", None)
+        handler = getattr(self, f"_cmd_{name}", None)
         if handler is None:
+            self._server._m_commands.inc(command="unknown")
             await self._send(Error(f"ERR unknown command '{command.decode('utf-8', 'replace')}'"))
             return True
-        return await handler(args)
+
+        started = time.perf_counter()
+        try:
+            return await handler(args)
+        finally:
+            self._server._m_commands.inc(command=name)
+            self._server._m_latency.observe(time.perf_counter() - started, command=name)
 
     # -- commands -----------------------------------------------------------
     async def _cmd_ping(self, args) -> bool:
@@ -175,6 +199,7 @@ class _Connection:
             return await self._send_ok_error("ERR key must not be empty")
         await self._server._run(lambda: self._server._set(key, value))
         self._broker.publish(key, "set", value)
+        self._server._m_changes.inc()
         await self._send(SimpleString("OK"))
         return True
 
@@ -192,6 +217,7 @@ class _Connection:
         removed = await self._server._run(lambda: self._server._delete(keys))
         for key in removed:
             self._broker.publish(key, "del", None)
+            self._server._m_changes.inc()
         await self._send(len(removed))
         return True
 
@@ -211,6 +237,26 @@ class _Connection:
 
     async def _cmd_dbsize(self, args) -> bool:
         await self._send(await self._server._run(lambda: len(self._server._db)))
+        return True
+
+    async def _cmd_info(self, args) -> bool:
+        stats = await self._server._run(lambda: self._server._db.stats())
+        # Redis INFO framing: CRLF line endings, sections separated by a blank line.
+        report = "\r\n".join([
+            "# Server",
+            "immustore_version:0.2.0",
+            "",
+            "# Storage",
+            f"keys:{stats.key_count}",
+            f"records:{stats.record_count}",
+            f"file_size:{stats.file_size}",
+            f"txn_id:{stats.txn_id}",
+            "",
+            "# Clients",
+            f"connected_clients:{int(self._server._m_connections.value())}",
+            "",
+        ])
+        await self._send(report)
         return True
 
     async def _cmd_command(self, args) -> bool:
@@ -276,11 +322,21 @@ async def _amain(args) -> None:
     server = ImmuServer(args.path, durability=args.durability)
     host, port = await server.start(args.host, args.port)
     print(f"ImmuStore serving {args.path!r} on {host}:{port} (RESP) — Ctrl-C to stop")
+
+    admin = None
+    if args.metrics_port is not None:
+        from .admin import AdminServer
+
+        admin = AdminServer(server.registry, host=args.host, port=args.metrics_port)
+        admin_host, admin_port = admin.start()
+        print(f"metrics on http://{admin_host}:{admin_port}/metrics")
     try:
         await server.serve_forever()
     except asyncio.CancelledError:
         pass
     finally:
+        if admin is not None:
+            admin.stop()
         await server.stop()
 
 
@@ -290,6 +346,8 @@ def main(argv=None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6380)
     parser.add_argument("--durability", default=DURABILITY_FULL, choices=("full", "none"))
+    parser.add_argument("--metrics-port", type=int, default=None,
+                        help="serve Prometheus metrics on this HTTP port")
     args = parser.parse_args(argv)
     try:
         asyncio.run(_amain(args))

@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import imustore
+from imustore.metrics import Registry
 from imustore.resp import Error, encode_command, read_reply
 from imustore.server import ImmuServer
 
@@ -169,6 +170,44 @@ def test_inline_command_is_accepted(tmp_path):
         finally:
             writer.close()
             await server.stop()
+
+    _run(run)
+
+
+def test_info_reports_storage_stats(tmp_path):
+    async def run():
+        server = ImmuServer(tmp_path / "info.db")
+        host, port = await server.start("127.0.0.1", 0)
+        client = await Client.connect(host, port)
+        try:
+            await client.cmd("SET", "a", "1")
+            info = await client.cmd("INFO")
+            assert "keys:1" in info and "immustore_version" in info
+            assert "\r\n" in info  # Redis INFO framing
+        finally:
+            await client.close()
+            await server.stop()
+
+    _run(run)
+
+
+def test_metrics_count_commands(tmp_path):
+    async def run():
+        registry = Registry()
+        server = ImmuServer(tmp_path / "metrics.db", registry=registry)
+        host, port = await server.start("127.0.0.1", 0)
+        client = await Client.connect(host, port)
+        try:
+            await client.cmd("SET", "a", "1")
+            await client.cmd("GET", "a")
+            await client.cmd("GET", "a")
+        finally:
+            await client.close()
+            await server.stop()
+        text = registry.render()
+        assert 'immustore_commands_total{command="get"} 2' in text
+        assert 'immustore_commands_total{command="set"} 1' in text
+        assert "immustore_command_seconds_count" in text
 
     _run(run)
 

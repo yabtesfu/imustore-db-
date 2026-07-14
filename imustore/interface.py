@@ -132,14 +132,24 @@ class DBDB(MutableMapping):
         self._assert_open()
         if self._path is None:
             raise ValueError("snapshots require a path-backed database")
-        root = self._storage.get_root_address()
-        count = self._storage.get_key_count()
-        reader = os.fdopen(os.open(self._path, os.O_RDONLY), "rb")
-        self._open_snapshots += 1
+        # Read the committed root/count from the shared main storage under the
+        # write mutex, so opening a snapshot can never race a concurrent
+        # committer mutating that same file object.
+        with self._write_mutex:
+            root = self._storage.get_root_address()
+            count = self._storage.get_key_count()
+            self._open_snapshots += 1
+        try:
+            reader = os.fdopen(os.open(self._path, os.O_RDONLY), "rb")
+        except Exception:
+            with self._write_mutex:
+                self._open_snapshots -= 1
+            raise
         return Snapshot(reader, root, count, codec=self._codec, on_close=self._snapshot_closed)
 
     def _snapshot_closed(self) -> None:
-        self._open_snapshots = max(0, self._open_snapshots - 1)
+        with self._write_mutex:
+            self._open_snapshots = max(0, self._open_snapshots - 1)
 
     def transaction(self) -> "Transaction":
         """Begin an optimistic, snapshot-isolated transaction (use with ``with``)."""
@@ -155,28 +165,33 @@ class DBDB(MutableMapping):
         self._assert_open()
         if self._path is None:
             raise ValueError("compaction requires a path-backed database")
-        if self._open_snapshots > 0:
-            raise ImmuStoreError("cannot compact while snapshots or transactions are open")
 
-        snapshot = list(self.items())
-        temp_path = self._path.with_suffix(self._path.suffix + ".compact.tmp")
-        compacted = connect(
-            temp_path, codec=self._codec, index=self._index_name, durability=self._durability
-        )
-        try:
-            for key, value in snapshot:
-                compacted[key] = value
-            compacted.commit()
-            stats = compacted.stats()
-        finally:
-            compacted.close()
+        # Hold the write mutex for the whole rewrite so no commit or snapshot can
+        # touch the file while it is being replaced (the snapshot count is checked
+        # under the same mutex snapshot() increments it under).
+        with self._write_mutex:
+            if self._open_snapshots > 0:
+                raise ImmuStoreError("cannot compact while snapshots or transactions are open")
 
-        self.close()
-        os.replace(temp_path, self._path)
-        reopened = _open_database_file(self._path)
-        self._storage = Storage(reopened, durability=self._durability)
-        self._tree = INDEX_CLASSES[self._index_name](self._storage)
-        return stats
+            snapshot = list(self.items())
+            temp_path = self._path.with_suffix(self._path.suffix + ".compact.tmp")
+            compacted = connect(
+                temp_path, codec=self._codec, index=self._index_name, durability=self._durability
+            )
+            try:
+                for key, value in snapshot:
+                    compacted[key] = value
+                compacted.commit()
+                stats = compacted.stats()
+            finally:
+                compacted.close()
+
+            self.close()
+            os.replace(temp_path, self._path)
+            reopened = _open_database_file(self._path)
+            self._storage = Storage(reopened, durability=self._durability)
+            self._tree = INDEX_CLASSES[self._index_name](self._storage)
+            return stats
 
     def __enter__(self):
         self._assert_open()

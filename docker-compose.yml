@@ -1,0 +1,45 @@
+# Two ways to run ImmuStore in containers.
+#
+#   docker compose up immustore          # a single RESP server + metrics
+#   docker compose up raft0 raft1 raft2  # a 3-node Raft cluster
+#
+# The Raft nodes find each other by Compose service name over the default network.
+
+services:
+  immustore:
+    build: .
+    ports:
+      - "6380:6380"   # RESP
+      - "9100:9100"   # Prometheus metrics
+    volumes:
+      - immustore-data:/data
+
+  raft0:
+    build: .
+    entrypoint: ["python", "-m", "imustore.raft.server"]
+    command: ["--id", "0", "--host", "0.0.0.0", "--port", "7400", "--db", "/data/node.db",
+              "--peer", "1:raft1:7401", "--peer", "2:raft2:7402"]
+    volumes:
+      - raft0-data:/data
+
+  raft1:
+    build: .
+    entrypoint: ["python", "-m", "imustore.raft.server"]
+    command: ["--id", "1", "--host", "0.0.0.0", "--port", "7401", "--db", "/data/node.db",
+              "--peer", "0:raft0:7400", "--peer", "2:raft2:7402"]
+    volumes:
+      - raft1-data:/data
+
+  raft2:
+    build: .
+    entrypoint: ["python", "-m", "imustore.raft.server"]
+    command: ["--id", "2", "--host", "0.0.0.0", "--port", "7402", "--db", "/data/node.db",
+              "--peer", "0:raft0:7400", "--peer", "1:raft1:7401"]
+    volumes:
+      - raft2-data:/data
+
+volumes:
+  immustore-data:
+  raft0-data:
+  raft1-data:
+  raft2-data:

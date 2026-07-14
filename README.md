@@ -20,6 +20,8 @@ The project is inspired by DBDB-style database internals: updates create new tre
 - Real-time change-data-capture: `SUBSCRIBE` to a key prefix and stream live set/delete events
 - MVCC: lock-free consistent read snapshots, and optimistic transactions with write-conflict detection
 - Raft consensus: replicate the database across a cluster with leader election and automatic failover
+- Document collections with secondary indexes, a query planner (index-or-scan), and TTL expiry
+- Observability: a Prometheus metrics endpoint and container images (Dockerfile + compose)
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
 - Transaction-like `update_value` helper
@@ -84,9 +86,12 @@ imustore/
   interface.py    Public database mapping API
   tool.py         Command-line interface
   mvcc.py         MVCC read snapshots
+  collection.py   Document collection: secondary indexes, queries, TTL
   server.py       Async RESP network server
   resp.py         RESP protocol codec
   pubsub.py       Change-data-capture broker
+  metrics.py      Prometheus metrics registry
+  admin.py        Admin HTTP endpoint (/metrics, /healthz, /stats)
   audit.py        Integrity report model
   raft/           Raft consensus (log, node, simulator, TCP transport)
 docs/
@@ -100,6 +105,8 @@ tests/
   test_recovery.py
   test_mvcc.py
   test_raft.py
+  test_collection.py
+  test_metrics.py
   test_server.py
   test_compaction.py
   test_cli.py
@@ -133,6 +140,24 @@ except ConflictError:
 ```
 
 `with db.transaction() as tx:` commits on success and rolls back on exception. See `examples/mvcc_snapshot.py`.
+
+## Documents, indexes & queries
+
+A `Collection` stores JSON documents and maintains **secondary indexes** so you can query by field without scanning everything. Index entries are written in the *same transaction* as the document, so they never drift out of sync.
+
+```python
+from imustore import connect, Collection
+
+db = connect("people.db")
+people = Collection(db, indexes=["team", "status"])
+people.set("u1", {"name": "Ada", "team": "core", "status": "active", "age": 36}, ttl=3600)
+
+q = people.query().where("team", "core").where("status", "active").filter(lambda d: d["age"] > 30)
+q.explain()   # {'plan': 'index', 'indexed_fields': ['team', 'status'], ...}
+q.all()       # [("u1", {...})]
+```
+
+The query engine does real query planning: equality predicates on indexed fields are answered by B+ tree range scans over the indexes (and intersected); the rest is applied as a residual filter; with no usable index it falls back to a full scan. Keys can carry a **TTL** — expired documents are hidden from reads and reclaimed by `sweep()`. See `examples/query_demo.py`.
 
 ## Network server & real-time changefeed
 
@@ -181,6 +206,24 @@ python examples/raft_cluster.py   # 3-node cluster in one process: elect, replic
 ```
 
 See [docs/raft.md](docs/raft.md).
+
+## Observability & deployment
+
+The server exposes **Prometheus metrics** (command counts, latency histograms, connection gauge, change-event counter) over a plain HTTP endpoint — no client library needed:
+
+```bash
+python -m imustore.server --port 6380 --metrics-port 9100
+curl localhost:9100/metrics     # Prometheus text exposition
+curl localhost:9100/healthz     # liveness probe
+redis-cli -p 6380 info          # storage stats over RESP
+```
+
+Container images ship too:
+
+```bash
+docker compose up immustore              # a single RESP server + metrics
+docker compose up raft0 raft1 raft2      # a 3-node Raft cluster
+```
 
 ## Durability Model
 
