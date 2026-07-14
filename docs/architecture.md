@@ -11,6 +11,7 @@ ImmuStore DB splits the storage engine into layers so each piece has one job.
 - `tool.py` provides terminal access for reads, writes, deletes, compaction, and inspection.
 - `mvcc.py` provides consistent, read-only point-in-time snapshots.
 - `server.py` / `resp.py` / `pubsub.py` expose the database over the network with a real-time changefeed.
+- `raft/` replicates the database across a cluster with the Raft consensus algorithm (see [raft.md](raft.md)).
 
 Updates are staged in memory until `commit()` is called. A commit stores dirty values and tree nodes first, then publishes a new meta block that points at the new root. Readers see either the previous root or the new root.
 

@@ -19,6 +19,7 @@ The project is inspired by DBDB-style database internals: updates create new tre
 - Networked server speaking the Redis RESP protocol (works with `redis-cli`)
 - Real-time change-data-capture: `SUBSCRIBE` to a key prefix and stream live set/delete events
 - MVCC: lock-free consistent read snapshots, and optimistic transactions with write-conflict detection
+- Raft consensus: replicate the database across a cluster with leader election and automatic failover
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
 - Transaction-like `update_value` helper
@@ -87,6 +88,7 @@ imustore/
   resp.py         RESP protocol codec
   pubsub.py       Change-data-capture broker
   audit.py        Integrity report model
+  raft/           Raft consensus (log, node, simulator, TCP transport)
 docs/
   architecture.md
   storage-format.md
@@ -97,6 +99,7 @@ tests/
   test_binary_tree.py
   test_recovery.py
   test_mvcc.py
+  test_raft.py
   test_server.py
   test_compaction.py
   test_cli.py
@@ -158,6 +161,26 @@ writer: DEL user:1             -> 1
 ```
 
 The server is built on stdlib `asyncio`. Database access is funnelled through a single-thread executor, which serializes writes safely against the single-writer engine while keeping the event loop responsive during a commit's fsync. Supported commands: `PING`, `ECHO`, `SET`, `GET`, `DEL`, `EXISTS`, `KEYS`, `DBSIZE`, `SUBSCRIBE`, `UNSUBSCRIBE`, `QUIT`.
+
+## Distribution & consensus (Raft)
+
+ImmuStore can replicate across a cluster using a from-scratch implementation of the **Raft consensus algorithm** (`imustore/raft/`) — leader election, log replication, and automatic failover — with the database as the replicated state machine. Committed log entries are applied to each node's ImmuStore engine, and the applied index rides in the same commit as the data, so apply is crash-safe and exactly-once.
+
+The consensus core reads no clock and does no I/O: it is driven purely by `tick()` and `step(message)` and returns the messages it wants sent. That determinism means the **same code** runs two ways:
+
+- **A simulated cluster** for reproducible, fault-injecting tests — crash nodes, restart them, partition the network — with zero flakiness. The suite asserts Raft's safety properties (at most one leader per term; committed logs never diverge) across 120 rounds of randomized chaos.
+- **A real TCP cluster** over `asyncio`. Launch nodes with the CLI and watch a leader get elected and survive being killed:
+
+```bash
+python -m imustore.raft.server --id 0 --port 7400 --db node0.db --peer 1:127.0.0.1:7401 --peer 2:127.0.0.1:7402
+# ...start nodes 1 and 2 similarly...
+```
+
+```bash
+python examples/raft_cluster.py   # 3-node cluster in one process: elect, replicate, kill leader, re-elect
+```
+
+See [docs/raft.md](docs/raft.md).
 
 ## Durability Model
 
