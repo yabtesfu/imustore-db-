@@ -1,6 +1,6 @@
 # ImmuStore DB
 
-ImmuStore DB is an educational key-value database engine built in Python. It explores append-only storage, immutable indexing, lazy references, atomic commits, compaction, and command-line tooling without hiding the storage mechanics behind a large framework.
+ImmuStore DB is key-value database engine built in Python. It explores append-only storage, immutable indexing, lazy references, atomic commits, compaction, and command-line tooling without hiding the storage mechanics behind a large framework.
 
 The project is inspired by DBDB-style database internals: updates create new tree paths, records are appended to disk, and a commit becomes visible by swapping a single root address.
 
