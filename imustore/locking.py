@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import io
 import os
 import time
+
+
+def _descriptor(fileobj):
+    """Return the OS file descriptor, or None for an in-memory (simulated) file."""
+    try:
+        return fileobj.fileno()
+    except io.UnsupportedOperation:
+        return None
 
 
 class FileLock:
@@ -27,7 +36,9 @@ class FileLock:
         else:
             import fcntl
 
-            fcntl.flock(self._fileobj.fileno(), fcntl.LOCK_EX)
+            fd = _descriptor(self._fileobj)
+            if fd is not None:  # in-memory files need no cross-process lock
+                fcntl.flock(fd, fcntl.LOCK_EX)
 
         self.locked = True
         return True
@@ -48,6 +59,8 @@ class FileLock:
         else:
             import fcntl
 
-            fcntl.flock(self._fileobj.fileno(), fcntl.LOCK_UN)
+            fd = _descriptor(self._fileobj)
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
 
         self.locked = False

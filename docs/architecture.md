@@ -13,6 +13,7 @@ ImmuStore DB splits the storage engine into layers so each piece has one job.
 - `collection.py` adds a document layer: secondary indexes, a query planner, and TTL expiry.
 - `server.py` / `resp.py` / `pubsub.py` expose the database over the network with a real-time changefeed.
 - `metrics.py` / `admin.py` provide Prometheus metrics and an admin HTTP endpoint.
+- `simdisk.py` / `simulation.py` run the engine against a simulated disk under seeded fault injection.
 - `raft/` replicates the database across a cluster with the Raft consensus algorithm (see [raft.md](raft.md)).
 
 Updates are staged in memory until `commit()` is called. A commit stores dirty values and tree nodes first, then publishes a new meta block that points at the new root. Readers see either the previous root or the new root.
@@ -62,6 +63,20 @@ overlay onto the current root and commits. An in-process mutex plus the on-disk
 file lock serialize the commit critical section. Because compaction rewrites the
 file and invalidates pinned roots, it refuses to run while any snapshot (or
 transaction) is open.
+
+## Deterministic simulation testing
+
+`simulation.py` drives the whole engine against `simdisk.py` -- an in-memory disk
+that models fsync durability (writes are only durable after `flush()`). A single
+seeded RNG chooses the workload and the faults (clean crash, crash mid-commit via
+`SimDisk.arm_crash`, torn trailing write, corrupted meta block), so a run is
+perfectly reproducible and any failure replays from its seed. After every
+recovery the simulator checks two invariants against a reference model: the
+database reopens with a passing `audit()`, and its committed state is the last
+committed version or the immediately preceding one (the most a torn meta write
+can cost). To make the simulated disk usable, `physical.Storage.flush()` and
+`FileLock` treat a file object with no descriptor (the simulated disk) as a
+no-op for fsync/flock while real files behave exactly as before.
 
 ## Network server and real-time changefeed
 

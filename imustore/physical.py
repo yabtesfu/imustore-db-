@@ -27,6 +27,7 @@ Three mechanisms make that flip provably crash-safe:
 
 from __future__ import annotations
 
+import io
 import os
 import struct
 import zlib
@@ -110,7 +111,12 @@ class Storage:
 
     def flush(self) -> None:
         self._f.flush()
-        os.fsync(self._f.fileno())
+        try:
+            os.fsync(self._f.fileno())
+        except io.UnsupportedOperation:
+            # A simulated in-memory disk has no descriptor; its flush() already
+            # models durability. Real files always have a descriptor and fsync.
+            pass
 
     def _file_size(self) -> int:
         self._f.seek(0, os.SEEK_END)

@@ -22,6 +22,7 @@ The project is inspired by DBDB-style database internals: updates create new tre
 - Raft consensus: replicate the database across a cluster with leader election and automatic failover
 - Document collections with secondary indexes, a query planner (index-or-scan), and TTL expiry
 - Observability: a Prometheus metrics endpoint and container images (Dockerfile + compose)
+- Deterministic simulation testing: seeded, reproducible fault injection against a simulated disk
 - Cross-platform file locking around writes
 - JSON, text, and bytes codecs
 - Transaction-like `update_value` helper
@@ -93,6 +94,8 @@ imustore/
   metrics.py      Prometheus metrics registry
   admin.py        Admin HTTP endpoint (/metrics, /healthz, /stats)
   audit.py        Integrity report model
+  simdisk.py      Simulated disk modeling fsync durability
+  simulation.py   Deterministic simulation test driver
   raft/           Raft consensus (log, node, simulator, TCP transport)
 docs/
   architecture.md
@@ -108,6 +111,7 @@ tests/
   test_collection.py
   test_metrics.py
   test_server.py
+  test_simulation.py
   test_compaction.py
   test_cli.py
 ```
@@ -245,6 +249,19 @@ python -m pytest
 
 The suite includes a randomized fuzz test for the B+ tree (checked against a reference `dict`) and a crash-injection matrix that simulates power loss at the byte level and asserts the database always recovers a committed state.
 
+## Deterministic simulation testing
+
+The storage engine is tested the way FoundationDB and TigerBeetle test theirs: run it against a **simulated disk** (`imustore/simdisk.py`) that models fsync durability, and drive it with a workload and faults drawn entirely from one seeded RNG. Faults include clean crashes, crashes *mid-commit*, torn trailing writes, and corrupted meta blocks. After every recovery two invariants are checked against a reference model: the database reopens with a clean `audit()`, and its committed state is the last committed version or the one before it.
+
+Because everything comes from the seed, a run is perfectly reproducible — if a seed finds a bug, it replays byte for byte:
+
+```bash
+python -m imustore.simulation --runs 1000 --steps 300   # sweep 1000 seeds
+python -m imustore.simulation --seed 4712 --steps 400   # replay one seed
+```
+
+A 1000-seed sweep exercises tens of thousands of crash/recover cycles. (The distributed layer gets the same treatment: `SimCluster` runs the Raft cluster deterministically through crashes, partitions, and restarts while checking Raft's safety properties.)
+
 ## Benchmarks
 
 ```bash
@@ -264,4 +281,4 @@ The B+ tree stays shallow and fast; the naive binary tree degrades to a linked l
 
 ## Status
 
-This started as a learning project. It has since grown a balanced copy-on-write B+ tree index, crash-safe shadow-paging commits with checksums and recovery, benchmarks, and CI — the building blocks of a real storage engine, kept small enough to read end to end.
+This started as a learning project. It has since grown a balanced copy-on-write B+ tree index, crash-safe shadow-paging commits with checksums and recovery, MVCC snapshots and optimistic transactions, a Redis-protocol server with a real-time changefeed, Raft replication, a document/query layer, observability, and deterministic simulation testing — the building blocks of a real distributed database, kept small enough to read end to end.
